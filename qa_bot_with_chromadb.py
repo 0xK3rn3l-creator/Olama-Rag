@@ -1,38 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Grounded Q&A Bot with citations — RAG-ядро.
+Grounded Q&A Bot with citations — RAG-ядро на базі ChromaDB.
 
 Пайплайн:
-  документи → chunking (по заголовках) → TF-IDF embeddings → векторне сховище
+  документи → chunking (по заголовках) → ChromaDB (локальні семантичні embeddings)
   → запит → embedding → retrieval → grounding → відповідь + citations
 
-Працює повністю офлайн (лише numpy):
-  • embeddings   — локальний TF-IDF (клас TfidfEmbedder)
-  • vector store — InMemoryVectorStore (косинусний пошук)
+Працює повністю офлайн (за допомогою ChromaDB ONNXMiniLM):
+  • embeddings   — вбудовані семантичні ONNX-ембедінги
+  • vector store — ChromaDB (збереження бази у директорію chroma_db)
   • генерація    — extractive (метод .ask) АБО через Ollama (див. main.py / ollama_llm.py)
-
-Цей файл можна запустити окремо для демонстрації extractive-режиму:
-    python3 qa_bot.py
-    python3 qa_bot.py "ваше питання"
 """
 
 from __future__ import annotations
 import os
 import re
 import sys
-import math
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
+# Імпортуємо ChromaDB та її швидкі локальні ONNX-ембедінги
+import chromadb
+from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(BASE, "docs")
+CHROMA_DIR = os.path.join(BASE, "chroma_db")
 
 # Поріг grounding: якщо найкращий збіг нижчий — бот каже "не знаю".
-SIM_THRESHOLD = 0.22
-NOT_FOUND = "Не знайшов інформації у наданій документації."
+# Для семантичних векторів зазвичай використовується діапазон схожості 0.35 - 0.45.
+SIM_THRESHOLD = 0.40
+NOT_FOUND = "Не знайшел інформації у наданій документації."
 
 
 # ==================================================================
@@ -112,77 +112,7 @@ def chunk_documents(docs: List[Dict]) -> List[Chunk]:
 
 
 # ==================================================================
-# 3) Embeddings — локальний TF-IDF (без зовнішніх сервісів)
-# ==================================================================
-# ==================================================================
-# 3) Embeddings — локальний TF-IDF (без зовнішніх сервісів)
-# ==================================================================
-
-# Список базових англійських стоп-слів, які заважають пошуку
-STOP_WORDS = {
-    "how", "to", "the", "a", "an", "and", "or", "but", "in", "on", "at", 
-    "by", "for", "with", "about", "against", "between", "into", "through", 
-    "during", "before", "after", "above", "below", "from", "up", 
-    "down", "out", "off", "over", "under", "again", "further", 
-    "then", "once", "here", "there", "when", "where", "why", "all", 
-    "any", "both", "each", "few", "more", "most", "other", "some", "such", 
-    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", 
-    "s", "t", "can", "will", "just", "should", "now", "i", "you", "my"
-}
-
-def tokenize(text: str) -> List[str]:
-    tokens = re.findall(r"[a-zA-Zа-яА-ЯіїєґІЇЄҐ0-9]+", text.lower())
-    # Відфільтровуємо службові слова
-    return [t for t in tokens if t not in STOP_WORDS]
-
-
-class TfidfEmbedder:
-    """Локальний embedder. Реалізує .fit() і .encode() (як у sklearn, але без залежностей)."""
-
-    def __init__(self):
-        self.vocab: Dict[str, int] = {}
-        self.idf: Optional[np.ndarray] = None
-
-    def fit(self, texts: List[str]) -> "TfidfEmbedder":
-        doc_freq: Dict[str, int] = {}
-        n_docs = len(texts)
-
-        for text in texts:
-            for tok in set(tokenize(text)):
-                doc_freq[tok] = doc_freq.get(tok, 0) + 1
-
-        self.vocab = {tok: i for i, tok in enumerate(sorted(doc_freq.keys()))}
-        idf = np.zeros(len(self.vocab), dtype=np.float64)
-        for tok, i in self.vocab.items():
-            idf[i] = math.log((1 + n_docs) / (1 + doc_freq[tok])) + 1.0
-        self.idf = idf
-        return self
-
-    def encode(self, texts: List[str]) -> np.ndarray:
-        if self.idf is None:
-            raise RuntimeError("TfidfEmbedder не навчений. Спочатку виклич .fit().")
-
-        vecs = np.zeros((len(texts), len(self.vocab)), dtype=np.float64)
-        for row, text in enumerate(texts):
-            tokens = tokenize(text)
-            if not tokens:
-                continue
-            tf: Dict[int, int] = {}
-            for tok in tokens:
-                idx = self.vocab.get(tok)
-                if idx is not None:
-                    tf[idx] = tf.get(idx, 0) + 1
-            for idx, count in tf.items():
-                vecs[row, idx] = (count / len(tokens)) * self.idf[idx]
-
-        # L2-нормалізація -> dot product стає косинусною подібністю
-        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        return vecs / norms
-
-
-# ==================================================================
-# 4) Векторне сховище (in-memory, косинусний пошук)
+# 3) Embeddings & 4) Векторне сховище (Переписано на ChromaDB)
 # ==================================================================
 @dataclass
 class Hit:
@@ -191,24 +121,16 @@ class Hit:
 
 
 class InMemoryVectorStore:
+    """
+    Збережено для сумісності інтерфейсів з іншими модулями.
+    Тепер працює як інтерфейс до ChromaDB.
+    """
     def __init__(self):
-        self.embeddings: Optional[np.ndarray] = None
         self.chunks: List[Chunk] = []
-
-    def add(self, embeddings: np.ndarray, chunks: List[Chunk]) -> None:
-        self.embeddings = embeddings
-        self.chunks = chunks
-
-    def query(self, qvec: np.ndarray, k: int = 3) -> List[Hit]:
-        if self.embeddings is None or len(self.chunks) == 0:
-            return []
-        sims = self.embeddings @ qvec  # вектори вже нормалізовані -> це косинус
-        order = np.argsort(-sims)[:k]
-        return [Hit(chunk=self.chunks[i], score=float(sims[i])) for i in order]
 
 
 # ==================================================================
-# 5) Grounded генерація відповіді + citations (extractive fallback)
+# 5) Grounded генерація відповіді (Оновлено під семантичні ембедінги)
 # ==================================================================
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 
@@ -234,25 +156,30 @@ class Answer:
         return out
 
 
-def generate_answer(query: str, hits: List[Hit], embedder: TfidfEmbedder) -> Answer:
-    """Extractive grounded answer: серед речень top-hits обирає найрелевантніше до query."""
+def generate_answer(query: str, hits: List[Hit], emb_fn) -> Answer:
+    """Extractive grounded answer за допомогою вбудованої моделі ембедінгів Chroma."""
     if not hits or hits[0].score < SIM_THRESHOLD:
         return Answer(text=NOT_FOUND, citations=[], grounded=False, hits=hits)
 
     candidates: List[Tuple[str, str]] = []  # (речення, джерело)
     for hit in hits:
         for sent in split_sentences(hit.chunk.text):
-            candidates.append((sent, hit.chunk.source))
+            if len(sent.split()) > 2:  # Ігноруємо занадто короткі уривки
+                candidates.append((sent, hit.chunk.source))
 
     if not candidates:
         return Answer(text=NOT_FOUND, citations=[], grounded=False, hits=hits)
 
     sent_texts = [c[0] for c in candidates]
-    sent_embedder = TfidfEmbedder().fit(sent_texts + [query])
-    sent_vecs = sent_embedder.encode(sent_texts)
-    q_vec = sent_embedder.encode([query])[0]
+    
+    # Використовуємо локальний ONNX MiniLM для точного ранжування речень
+    candidate_embeddings = np.array(emb_fn(sent_texts))
+    query_embedding = np.array(emb_fn([query])[0])
 
-    sims = sent_vecs @ q_vec
+    norm_candidates = candidate_embeddings / np.linalg.norm(candidate_embeddings, axis=1, keepdims=True)
+    norm_query = query_embedding / np.linalg.norm(query_embedding)
+
+    sims = norm_candidates @ norm_query
     best_idx = int(np.argmax(sims))
     best_sentence, _ = candidates[best_idx]
 
@@ -265,45 +192,100 @@ def generate_answer(query: str, hits: List[Hit], embedder: TfidfEmbedder) -> Ans
 
 
 # ==================================================================
-# 6) Сам бот
+# 6) Сам бот (ChromaDB інтеграція)
 # ==================================================================
 class GroundedQABot:
-    def __init__(self, embedder: Optional[TfidfEmbedder] = None,
-                 store: Optional[InMemoryVectorStore] = None,
-                 threshold: float = SIM_THRESHOLD):
-        self.embedder = embedder or TfidfEmbedder()
-        self.store = store or InMemoryVectorStore()
+    def __init__(self, embedder=None, store=None, threshold: float = SIM_THRESHOLD):
         self.threshold = threshold
-        self._indexed = False
+        
+        # Ініціалізуємо локальну модель семантичних ембедінгів Chroma (~80MB)
+        self.emb_fn = ONNXMiniLM_L6_V2()
+        
+        # Налаштовуємо базу даних з персистентним збереженням на диску
+        self.chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
+        
+        # Створюємо або отримуємо колекцію з косинусною відстанью (cosine space)
+        self.collection = self.chroma_client.get_or_create_collection(
+            name="rag_documents_collection",
+            embedding_function=self.emb_fn,
+            metadata={"hnsw:space": "cosine"}
+        )
+        self._indexed = self.collection.count() > 0
+
+    @property
+    def store(self):
+        """Емулюємо властивості оригінального VectorStore для сумісності з іншими скриптами."""
+        class DummyStore:
+            def __init__(self, count, chunks):
+                self.chunks = chunks
+        
+        # Створюємо фіктивні Chunk об'єкти для відображення статистики в main()
+        dummy_chunks = []
+        if self.collection.count() > 0:
+            metas = self.collection.get(include=["metadatas"])["metadatas"]
+            if metas:
+                for m in metas:
+                    dummy_chunks.append(Chunk(id=m["original_id"], source=m["source"], section=m["section"], text=""))
+        return DummyStore(self.collection.count(), dummy_chunks)
 
     def index(self, docs_dir: str = DOCS_DIR) -> "GroundedQABot":
         docs = load_documents(docs_dir)
         chunks = chunk_documents(docs)
 
         if not chunks:
-            self.store.add(np.zeros((0, 0)), [])
             self._indexed = True
             return self
 
-        texts = [c.text for c in chunks]
-        self.embedder.fit(texts)
-        embeddings = self.embedder.encode(texts)
-        self.store.add(embeddings, chunks)
+        # Підготовка пакетів даних для ChromaDB
+        ids = [f"chunk_{c.id}" for c in chunks]
+        documents = [c.text for c in chunks]
+        metadatas = [{"source": c.source, "section": c.section, "original_id": c.id} for c in chunks]
+
+        # Chroma автоматично викличе ONNX модель та збереже вектори у базу
+        self.collection.upsert(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas
+        )
         self._indexed = True
         return self
 
     def retrieve(self, question: str, k: int = 3) -> List[Hit]:
         if not self._indexed:
             raise RuntimeError("Бот не проіндексований. Спочатку виклич .index().")
-        if not self.store.chunks:
+        if self.collection.count() == 0:
             return []
-        qvec = self.embedder.encode([question])[0]
-        return self.store.query(qvec, k=k)
+
+        # Пошук найближчих векторів
+        results = self.collection.query(
+            query_texts=[question],
+            n_results=k
+        )
+
+        hits = []
+        if results and results["ids"] and results["ids"][0]:
+            ids = results["ids"][0]
+            documents = results["documents"][0]
+            metadatas = results["metadatas"][0]
+            distances = results["distances"][0]
+
+            for i in range(len(ids)):
+                chunk = Chunk(
+                    id=metadatas[i]["original_id"],
+                    source=metadatas[i]["source"],
+                    section=metadatas[i]["section"],
+                    text=documents[i]
+                )
+                # Перетворюємо косинусну відстань у схожість (Similarity score)
+                score = 1.0 - float(distances[i])
+                hits.append(Hit(chunk=chunk, score=score))
+
+        return hits
 
     def ask(self, question: str, k: int = 3) -> Answer:
-        """Offline extractive-режим (без LLM)."""
+        """Offline extractive-режим за допомогою семантичних ембедінгів Chroma."""
         hits = self.retrieve(question, k=k)
-        return generate_answer(question, hits, self.embedder)
+        return generate_answer(question, hits, self.emb_fn)
 
 
 # ==================================================================
@@ -320,24 +302,19 @@ DEMO_QUESTIONS = [
 
 
 def _demo():
-    # За замовчуванням використовуємо стандартну папку docs
     docs_dir = DOCS_DIR
     questions = DEMO_QUESTIONS
 
-    # Якщо передано аргументи командного рядка
     if len(sys.argv) > 1:
         first_arg = sys.argv[1]
-        # Якщо перший аргумент — це шлях до існуючої папки
         if os.path.isdir(first_arg):
             docs_dir = first_arg
-            # Якщо після папки передані ще аргументи, вважаємо їх окремими питаннями
             if len(sys.argv) > 2:
                 questions = sys.argv[2:]
         else:
-            # Якщо перший аргумент не є папкою, то вважаємо всі аргументи питаннями
             questions = sys.argv[1:]
 
-    # Індексуємо саме ту папку, яку визначили
+    # Створюємо бота та запускаємо індексацію
     bot = GroundedQABot().index(docs_dir)
     
     print(f"Проіндексовано чанків: {len(bot.store.chunks)} "
