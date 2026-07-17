@@ -1,94 +1,142 @@
 # 🤖 Grounded Q&A Bot (RAG with Ollama)
 
-**Grounded Q&A Bot** — це інтелектуальний помічник, побудований на принципах **RAG (Retrieval-Augmented Generation)**. Проєкт дозволяє виконувати розумний пошук та генерацію відповідей на основі ваших власних локальних текстових документів (`.txt`, `.md`). 
+**Grounded Q&A Bot** is a simple RAG (Retrieval-Augmented Generation) application. It can search your local text files (`.txt`, `.md`) and answer questions using the information inside them.
 
-Головна особливість проєкту — **повна автономність та приватність**: уся текстова аналітика, векторний пошук та генерація за допомогою LLM відбуваються локально на вашому комп'ютері без передачі даних у хмару.
+Everything runs on your own computer. Your documents stay local, and no data is sent to the cloud.
 
 ---
 
-## 🚀 Підготовка до запуску
+## 🚀 Getting Started
 
-Щоб запустити бота, потрібно підготувати середовище, встановити залежності та локальну мовну модель.
+Before running the project, install the required software and prepare your environment.
 
-### 1. Встановлення та запуск Ollama
-Для режимів із генерацією тексту (LLM) використовується **Ollama**.
+### 1. Install Ollama
 
-1. Завантажте та встановіть Ollama з офіційного сайту: [ollama.com](https://ollama.com).
-2. Запустіть додаток Ollama на комп'ютері.
-3. Завантажте модель за замовчуванням (наприклад, `llama3:8b` або іншу легшу модель, як `gemma2:2b`):
-   ```bash
-   ollama pull llama3:8b
-   ```
+Ollama is used for the modes that generate answers with an LLM.
 
-### 2. Клонування та налаштування оточення
-1. Створіть віртуальне середовище та активуйте його:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # Для Linux/macOS
-   # або для Windows:
-   # venv\Scripts\activate
-   ```
-2. Встановіть необхідну бібліотеку **NumPy** (це єдина зовнішня математична залежність для векторного сховища!):
-   ```bash
-   pip install numpy
-   ```
+1. Download and install Ollama from **https://ollama.com**.
+2. Start the Ollama application.
+3. Download a model, for example:
 
-### 3. Підготовка документів для бази знань
-Створіть папку `docs` у корені проєкту та покладіть туди свої файли у форматі `.md` або `.txt` (наприклад, інструкції, конспекти, документацію):
+```bash
+ollama pull llama3:8b
+```
+
+You can also use a smaller model such as `gemma2:2b`.
+
+### 2. Create a Python Environment
+
+Create and activate a virtual environment:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate   # Linux/macOS
+# Windows:
+# venv\Scripts\activate
+```
+
+Install NumPy:
+
+```bash
+pip install numpy
+```
+
+### 3. Add Your Documents
+
+Create a `docs` folder and put your `.md` or `.txt` files inside it.
+
+Example:
+
 ```bash
 mkdir docs
-echo "## Password Reset\nTo reset your password, click on 'Forgot Password' link on the login page." > docs/auth.md
+echo "## Password Reset\nTo reset your password, click on 'Forgot Password' on the login page." > docs/auth.md
 ```
 
 ---
 
-## 🛠️ Функціонал та режими роботи
+## 🛠️ Available Modes
 
-Запуск бота здійснюється однією командою:
+Run the program with:
+
 ```bash
 python3 main.py
 ```
 
-При запуску програма запропонує обрати один із **трьох режимів роботи**:
+Choose one of the three modes.
 
-### 1️⃣ Offline RAG (extractive, без LLM)
-* **Як працює:** Бот розбиває ваші документи на логічні частини (чанкі) за Markdown-заголовками, будує локальні векторні представлення за допомогою самописного алгоритму **TF-IDF (без зовнішніх API)** та зберігає їх у пам'яті. При запиті знаходить найбільш відповідне речення безпосередньо з документів і видає його як відповідь.
-* **Перевага:** Працює миттєво, не потребує GPU та запущеної Ollama.
+### 1️⃣ Offline RAG
 
-### 2️⃣ Offline RAG + Ollama (grounded generation)
-* **Як працює:** Розумний повноцінний RAG-контекст. Бот здійснює пошук релевантних документів у вашій базі знань за косинусною подібністю векторів. Знайдений контекст передається у локальну LLM через **Ollama HTTP API** із підтримкою **Streaming (потокового виведення)**. Якщо точної відповіді немає у ваших документах, спрацьовує ліміт подібності (threshold), і бот безпечно відповідає, що інформації не знайдено, запобігаючи галюцинаціям.
-* **Перевага:** Повноцінні, зв'язні та обґрунтовані відповіді на основі ваших файлів.
+**How it works**
 
-### 3️⃣ Normal Ollama (без RAG)
-* **Як працює:** Класичний інтерактивний чат із локальною мовною моделлю (на кшталт ChatGPT), але повністю на вашому комп'ютері. Запит надсилається напряму до Ollama.
-* **Перевага:** Швидкий доступ до ШІ для будь-яких загальних питань.
+* Splits documents into chunks.
+* Creates TF-IDF embeddings.
+* Finds the best matching sentence.
+* Returns the answer directly from the documents.
 
----
+**Pros**
 
-## 📂 Структура проєкту
-
-Проєкт складається з 4 основних файлів:
-* `main.py` — головна точка входу. Керує діалоговим циклом, вибором режимів, шляхів до документів та обробкою потокового виводу (streaming).
-* `qa_bot.py` — RAG-ядро системи. Містить завантажувач документів, чанкер по Markdown-заголовках, власну легку реалізацію `TfidfEmbedder` та векторне сховище `InMemoryVectorStore` з косинусним пошуком на базі NumPy.
-* `ollama_llm.py` — модуль для взаємодії з локальним сервером Ollama через HTTP API. Підтримує потокову генерацію токенів та автоматичний fallback на CLI-інтерфейс, якщо HTTP-сервер недоступний.
-* `README.md` — інструкція та опис проєкту.
+* Very fast.
+* Works without Ollama.
+* No GPU needed.
 
 ---
 
-## 💻 Приклад використання (RAG + Ollama)
+### 2️⃣ Offline RAG + Ollama
+
+**How it works**
+
+* Searches your documents for the best matching text.
+* Sends the found context to Ollama.
+* Generates a grounded answer using only the retrieved information.
+* If nothing relevant is found, the bot says that it does not know.
+
+**Pros**
+
+* More natural answers.
+* Uses your own documents as the knowledge source.
+* Supports streaming output.
+
+---
+
+### 3️⃣ Normal Ollama
+
+**How it works**
+
+* Sends your question directly to Ollama.
+* Does not use the document database.
+
+**Pros**
+
+* Simple chat with a local LLM.
+* Good for general questions.
+
+---
+
+## 📂 Project Files
+
+The project has four main files.
+
+* `main.py` – starts the program, lets you choose the mode, loads documents, and prints streaming output.
+* `qa_bot.py` – loads documents, splits them into chunks, creates TF-IDF embeddings, and searches for the best match.
+* `ollama_llm.py` – connects to Ollama through the HTTP API and supports streaming with CLI fallback.
+* `README.md` – project documentation.
+
+---
+
+## 💻 Example
 
 ```text
 ========================================
 Grounded QA Bot
 ========================================
 
-1. Offline RAG (extractive, без LLM)
-2. Offline RAG + Ollama (grounded generation)
-3. Normal Ollama (без RAG)
+1. Offline RAG
+2. Offline RAG + Ollama
+3. Normal Ollama
 
 Choose [1/2/3]: 2
-Enter path to documents [/user/projects/docs]: 
-Доступні локальні моделі: llama3:8b, gemma2:2b
+Enter path to documents [/user/projects/docs]:
+Available models: llama3:8b, gemma2:2b
 Model [llama3:8b]: llama3:8b
 
 Loading documents...
@@ -108,7 +156,10 @@ Assistant > To reset your password, click on the "Forgot Password" link on the l
 
 ---
 
-## ⚙️ Налаштування та тюнінг
+## ⚙️ Settings
 
-У файлі `qa_bot.py` ви можете змінити чутливість пошуку:
-* `SIM_THRESHOLD = 0.22` — поріг фільтрації нерелевантних запитів. Якщо косинусна подібність знайденого тексту менша за цей показник, бот скаже, що не має інформації у ваших документах (запобігає вигадуванню відповідей).
+You can change the search threshold in `qa_bot.py`.
+
+* `SIM_THRESHOLD = 0.22`
+
+If the similarity score is lower than this value, the bot will return that it could not find the answer in your documents instead of making one up.

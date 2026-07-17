@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Локальна взаємодія з Ollama через HTTP API з підтримкою потокового виведення (Streaming)
-та автоматичним fallback на CLI (subprocess).
+Local Ollama client using the HTTP API.
+If the API is not available, it uses the Ollama CLI.
 """
 
 from __future__ import annotations
@@ -14,35 +14,36 @@ import urllib.error
 from typing import List, Generator
 
 DEFAULT_MODEL = "llama3:8b"
-OLLAMA_URL = "http://localhost:11434"  # Стандартний порт локального сервера Ollama
+OLLAMA_URL = "http://localhost:11434"
 
 
 class OllamaError(RuntimeError):
-    """Помилка виклику Ollama (немає бінарника, таймаут, помилка API тощо)."""
+    """Error while using Ollama."""
 
 
 def is_ollama_available() -> bool:
-    """Перевіряє, чи запущений локальний сервер Ollama, або чи є команда `ollama` у PATH."""
+    """Check if the Ollama server is running or the CLI is available."""
     try:
-        # Пробуємо підключитися до локального API
+        # Try the local API
         with urllib.request.urlopen(OLLAMA_URL, timeout=1.5) as response:
             if response.status == 200:
                 return True
     except Exception:
         pass
-    # Якщо API не відповідає, перевіряємо наявність CLI у PATH
+
+    # Check if the CLI exists
     return shutil.which("ollama") is not None
 
 
 def list_models() -> List[str]:
-    """Повертає список локально встановлених моделей (пріоритет API -> fallback на CLI)."""
+    """Return a list of installed models."""
     try:
         req = urllib.request.Request(f"{OLLAMA_URL}/api/tags")
         with urllib.request.urlopen(req, timeout=3) as response:
             data = json.loads(response.read().decode("utf-8"))
             return [model["name"] for model in data.get("models", [])]
     except Exception:
-        # Резервний варіант через CLI, якщо сервер не запущений
+        # Use the CLI if the API is not available
         if shutil.which("ollama") is not None:
             try:
                 result = subprocess.run(
@@ -59,25 +60,25 @@ def list_models() -> List[str]:
 
 
 def run_ollama(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 120) -> Generator[str, None, None]:
-    """Надсилає prompt в Ollama через локальний HTTP API та повертає генератор токенів.
-    
-    Якщо API недоступне (наприклад, не запущено службу ollama), 
-    автоматично перемикається на запуск через CLI (subprocess), де віддає всю відповідь одним шматком.
+    """Send a prompt to Ollama and return generated tokens.
+
+    If the API is not available, the CLI is used instead.
     """
     payload = {
         "model": model,
         "prompt": prompt,
-        "stream": True  # Вмикаємо потокову передачу (Streaming)
+        "stream": True
     }
+
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{OLLAMA_URL}/api/generate",
         data=data,
         headers={"Content-Type": "application/json"}
     )
-    
+
     try:
-        # 1. Пробуємо зробити швидкий HTTP-запит з потоковим зчитуванням ліній
+        # Read streamed tokens from the API
         with urllib.request.urlopen(req, timeout=timeout) as response:
             for line in response:
                 if line:
@@ -87,9 +88,9 @@ def run_ollama(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 120) -> G
                         yield token
                     if res_data.get("done", False):
                         break
-            
+
     except urllib.error.URLError as e:
-        # 2. Якщо сервер не відповідає — робимо fallback на запуск через CLI
+        # Use the CLI if the API is not available
         if not shutil.which("ollama"):
             raise OllamaError(
                 f"Не вдалося з'єднатися з Ollama API ({e.reason if hasattr(e, 'reason') else e}).\n"
@@ -97,7 +98,7 @@ def run_ollama(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 120) -> G
             )
 
         try:
-            # У режимі CLI (subprocess) ми зчитуємо весь результат відразу для стабільності
+            # Run the CLI and get the full answer
             result = subprocess.run(
                 ["ollama", "run", model],
                 input=prompt,
@@ -118,9 +119,9 @@ def run_ollama(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 120) -> G
                 f"Спроба запустити через CLI повернула помилку: {stderr}"
             )
 
-        # Віддаємо весь текст CLI як один великий фінальний токен
+        # Return the full CLI output
         yield result.stdout.strip()
-        
+
     except Exception as e:
         raise OllamaError(f"Помилка при генерації відповіді Ollama: {e}")
 
@@ -147,12 +148,12 @@ def build_grounded_prompt(question: str, context: str) -> str:
 
 
 def ask_ollama_grounded(question: str, context_chunks: List[str], model: str = DEFAULT_MODEL) -> Generator[str, None, None]:
-    """RAG-режим: повертає генератор токенів для формування відповіді в реальному часі."""
+    """Use Ollama with RAG context."""
     context = "\n\n".join(context_chunks)
     prompt = build_grounded_prompt(question, context)
     yield from run_ollama(prompt, model=model)
 
 
 def ask_ollama_freeform(question: str, model: str = DEFAULT_MODEL) -> Generator[str, None, None]:
-    """Звичайний чат без RAG-контексту в потоковому режимі."""
+    """Use Ollama without RAG."""
     yield from run_ollama(question, model=model)

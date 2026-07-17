@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Grounded Q&A Bot with citations — RAG-ядро на базі ChromaDB.
+Grounded Q&A Bot with citations using ChromaDB.
 
-Пайплайн:
-  документи → chunking (по заголовках) → ChromaDB (локальні семантичні embeddings)
-  → запит → embedding → retrieval → grounding → відповідь + citations
+Pipeline:
+  documents → chunking (by headings) → ChromaDB (local semantic embeddings)
+  → query → embedding → retrieval → grounded answer + citations
 
-Працює повністю офлайн (за допомогою ChromaDB ONNXMiniLM):
-  • embeddings   — вбудовані семантичні ONNX-ембедінги
-  • vector store — ChromaDB (збереження бази у директорію chroma_db)
-  • генерація    — extractive (метод .ask) АБО через Ollama (див. main.py / ollama_llm.py)
+Runs fully offline with ChromaDB ONNXMiniLM:
+  • embeddings   — built-in ONNX embeddings
+  • vector store — ChromaDB (saved in the chroma_db folder)
+  • generation   — extractive (.ask) or Ollama (see main.py / ollama_llm.py)
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
-# Імпортуємо ChromaDB та її швидкі локальні ONNX-ембедінги
+
+# ChromaDB and local ONNX embeddings
 import chromadb
 from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
@@ -29,17 +30,15 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(BASE, "docs")
 CHROMA_DIR = os.path.join(BASE, "chroma_db")
 
-# Поріг grounding: якщо найкращий збіг нижчий — бот каже "не знаю".
-# Для семантичних векторів зазвичай використовується діапазон схожості 0.35 - 0.45.
 SIM_THRESHOLD = 0.40
 NOT_FOUND = "Не знайшел інформації у наданій документації."
 
 
 # ==================================================================
-# 1) Завантаження документів
+# 1) Load documents
 # ==================================================================
 def load_documents(docs_dir: str) -> List[Dict]:
-    """Рекурсивно читає всі .md / .txt файли з директорії."""
+    """Read all .md and .txt files from a folder."""
     docs: List[Dict] = []
     if not os.path.isdir(docs_dir):
         return docs
@@ -61,7 +60,7 @@ def load_documents(docs_dir: str) -> List[Dict]:
 
 
 # ==================================================================
-# 2) Chunking — по Markdown-заголовках "## Section"
+# 2) Split documents into chunks
 # ==================================================================
 @dataclass
 class Chunk:
@@ -75,8 +74,8 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
 
 
 def chunk_documents(docs: List[Dict]) -> List[Chunk]:
-    """Ріже кожен документ по заголовках. Якщо заголовків немає — весь
-    документ стає одним чанком."""
+    """Split each document by Markdown headings. If there are no headings,
+    the whole document becomes one chunk."""
     chunks: List[Chunk] = []
     cid = 0
 
@@ -92,7 +91,7 @@ def chunk_documents(docs: List[Dict]) -> List[Chunk]:
                 cid += 1
             continue
 
-        # Текст перед першим заголовком
+        # Text before the first heading
         if headings[0].start() > 0:
             intro = text[: headings[0].start()].strip()
             if intro:
@@ -112,7 +111,7 @@ def chunk_documents(docs: List[Dict]) -> List[Chunk]:
 
 
 # ==================================================================
-# 3) Embeddings & 4) Векторне сховище (Переписано на ChromaDB)
+# 3) Embeddings & 4) Vector store
 # ==================================================================
 @dataclass
 class Hit:
@@ -122,15 +121,16 @@ class Hit:
 
 class InMemoryVectorStore:
     """
-    Збережено для сумісності інтерфейсів з іншими модулями.
-    Тепер працює як інтерфейс до ChromaDB.
+    Kept for compatibility with the other modules.
+    Now it works as a ChromaDB interface.
     """
+
     def __init__(self):
         self.chunks: List[Chunk] = []
 
 
 # ==================================================================
-# 5) Grounded генерація відповіді (Оновлено під семантичні ембедінги)
+# 5) Generate grounded answer
 # ==================================================================
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 
@@ -157,22 +157,22 @@ class Answer:
 
 
 def generate_answer(query: str, hits: List[Hit], emb_fn) -> Answer:
-    """Extractive grounded answer за допомогою вбудованої моделі ембедінгів Chroma."""
+    """Pick the best matching sentence using Chroma embeddings."""
     if not hits or hits[0].score < SIM_THRESHOLD:
         return Answer(text=NOT_FOUND, citations=[], grounded=False, hits=hits)
 
-    candidates: List[Tuple[str, str]] = []  # (речення, джерело)
+    candidates: List[Tuple[str, str]] = []  # (sentence, source)
     for hit in hits:
         for sent in split_sentences(hit.chunk.text):
-            if len(sent.split()) > 2:  # Ігноруємо занадто короткі уривки
+            if len(sent.split()) > 2:  # Skip very short sentences
                 candidates.append((sent, hit.chunk.source))
 
     if not candidates:
         return Answer(text=NOT_FOUND, citations=[], grounded=False, hits=hits)
 
     sent_texts = [c[0] for c in candidates]
-    
-    # Використовуємо локальний ONNX MiniLM для точного ранжування речень
+
+    # Create embeddings for sentence ranking
     candidate_embeddings = np.array(emb_fn(sent_texts))
     query_embedding = np.array(emb_fn([query])[0])
 
@@ -189,22 +189,20 @@ def generate_answer(query: str, hits: List[Hit], emb_fn) -> Answer:
             sources.append(hit.chunk.source)
 
     return Answer(text=best_sentence, citations=sources, grounded=True, hits=hits)
-
-
 # ==================================================================
-# 6) Сам бот (ChromaDB інтеграція)
+# 6) Main bot
 # ==================================================================
 class GroundedQABot:
     def __init__(self, embedder=None, store=None, threshold: float = SIM_THRESHOLD):
         self.threshold = threshold
-        
-        # Ініціалізуємо локальну модель семантичних ембедінгів Chroma (~80MB)
+
+        # Initialize the local embedding model (~80 MB)
         self.emb_fn = ONNXMiniLM_L6_V2()
-        
-        # Налаштовуємо базу даних з персистентним збереженням на диску
+
+        # Create a persistent ChromaDB database
         self.chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
-        
-        # Створюємо або отримуємо колекцію з косинусною відстанью (cosine space)
+
+        # Create or load the collection
         self.collection = self.chroma_client.get_or_create_collection(
             name="rag_documents_collection",
             embedding_function=self.emb_fn,
@@ -214,18 +212,26 @@ class GroundedQABot:
 
     @property
     def store(self):
-        """Емулюємо властивості оригінального VectorStore для сумісності з іншими скриптами."""
+        """Provide the same interface as the original VectorStore."""
+
         class DummyStore:
             def __init__(self, count, chunks):
                 self.chunks = chunks
-        
-        # Створюємо фіктивні Chunk об'єкти для відображення статистики в main()
+
+        # Create temporary Chunk objects for statistics
         dummy_chunks = []
         if self.collection.count() > 0:
             metas = self.collection.get(include=["metadatas"])["metadatas"]
             if metas:
                 for m in metas:
-                    dummy_chunks.append(Chunk(id=m["original_id"], source=m["source"], section=m["section"], text=""))
+                    dummy_chunks.append(
+                        Chunk(
+                            id=m["original_id"],
+                            source=m["source"],
+                            section=m["section"],
+                            text=""
+                        )
+                    )
         return DummyStore(self.collection.count(), dummy_chunks)
 
     def index(self, docs_dir: str = DOCS_DIR) -> "GroundedQABot":
@@ -236,12 +242,19 @@ class GroundedQABot:
             self._indexed = True
             return self
 
-        # Підготовка пакетів даних для ChromaDB
+        # Prepare data for ChromaDB
         ids = [f"chunk_{c.id}" for c in chunks]
         documents = [c.text for c in chunks]
-        metadatas = [{"source": c.source, "section": c.section, "original_id": c.id} for c in chunks]
+        metadatas = [
+            {
+                "source": c.source,
+                "section": c.section,
+                "original_id": c.id
+            }
+            for c in chunks
+        ]
 
-        # Chroma автоматично викличе ONNX модель та збереже вектори у базу
+        # Chroma creates embeddings automatically
         self.collection.upsert(
             ids=ids,
             documents=documents,
@@ -256,7 +269,7 @@ class GroundedQABot:
         if self.collection.count() == 0:
             return []
 
-        # Пошук найближчих векторів
+        # Search for the closest vectors
         results = self.collection.query(
             query_texts=[question],
             n_results=k
@@ -276,20 +289,21 @@ class GroundedQABot:
                     section=metadatas[i]["section"],
                     text=documents[i]
                 )
-                # Перетворюємо косинусну відстань у схожість (Similarity score)
+
+                # Convert distance to similarity score
                 score = 1.0 - float(distances[i])
                 hits.append(Hit(chunk=chunk, score=score))
 
         return hits
 
     def ask(self, question: str, k: int = 3) -> Answer:
-        """Offline extractive-режим за допомогою семантичних ембедінгів Chroma."""
+        """Offline extractive mode using Chroma embeddings."""
         hits = self.retrieve(question, k=k)
         return generate_answer(question, hits, self.emb_fn)
 
 
 # ==================================================================
-# 7) Демонстрація (можна запускати цей файл окремо)
+# 7) Demo
 # ==================================================================
 DEMO_QUESTIONS = [
     "How do I reset my password?",
@@ -297,7 +311,7 @@ DEMO_QUESTIONS = [
     "How do I delete a user?",
     "How does API authentication work?",
     "Which currencies are supported?",
-    "Do you have a mobile app?",   # немає в документації -> grounding спрацює
+    "Do you have a mobile app?",
 ]
 
 
@@ -307,16 +321,20 @@ def _demo():
 
     if len(sys.argv) > 1:
         first_arg = sys.argv[1]
+
+        # If the first argument is a folder
         if os.path.isdir(first_arg):
             docs_dir = first_arg
+
+            # Use the remaining arguments as questions
             if len(sys.argv) > 2:
                 questions = sys.argv[2:]
         else:
             questions = sys.argv[1:]
 
-    # Створюємо бота та запускаємо індексацію
+    # Create the bot and index the documents
     bot = GroundedQABot().index(docs_dir)
-    
+
     print(f"Проіндексовано чанків: {len(bot.store.chunks)} "
           f"з {len(set(c.source for c in bot.store.chunks))} документів у папці: {docs_dir}\n")
 

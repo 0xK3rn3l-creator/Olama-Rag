@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Grounded Q&A Bot with citations — RAG-ядро.
+Grounded Q&A Bot with citations.
 
-Пайплайн:
-  документи → chunking (по заголовках) → TF-IDF embeddings → векторне сховище
-  → запит → embedding → retrieval → grounding → відповідь + citations
+Pipeline:
+  documents → chunking (by headings) → TF-IDF embeddings → vector store
+  → query → embedding → retrieval → grounded answer + citations
 
-Працює повністю офлайн (лише numpy):
-  • embeddings   — локальний TF-IDF (клас TfidfEmbedder)
-  • vector store — InMemoryVectorStore (косинусний пошук)
-  • генерація    — extractive (метод .ask) АБО через Ollama (див. main.py / ollama_llm.py)
+Runs fully offline (only numpy):
+  • embeddings   — local TF-IDF (TfidfEmbedder)
+  • vector store — InMemoryVectorStore (cosine search)
+  • generation   — extractive (.ask) or Ollama (see main.py / ollama_llm.py)
 
-Цей файл можна запустити окремо для демонстрації extractive-режиму:
+You can run this file directly:
     python3 qa_bot.py
-    python3 qa_bot.py "ваше питання"
+    python3 qa_bot.py "your question"
 """
 
 from __future__ import annotations
@@ -30,16 +30,15 @@ import numpy as np
 BASE = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(BASE, "docs")
 
-# Поріг grounding: якщо найкращий збіг нижчий — бот каже "не знаю".
 SIM_THRESHOLD = 0.22
 NOT_FOUND = "Не знайшов інформації у наданій документації."
 
 
 # ==================================================================
-# 1) Завантаження документів
+# 1) Load documents
 # ==================================================================
 def load_documents(docs_dir: str) -> List[Dict]:
-    """Рекурсивно читає всі .md / .txt файли з директорії."""
+    """Read all .md and .txt files from a folder."""
     docs: List[Dict] = []
     if not os.path.isdir(docs_dir):
         return docs
@@ -61,7 +60,7 @@ def load_documents(docs_dir: str) -> List[Dict]:
 
 
 # ==================================================================
-# 2) Chunking — по Markdown-заголовках "## Section"
+# 2) Split documents into chunks
 # ==================================================================
 @dataclass
 class Chunk:
@@ -75,8 +74,8 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
 
 
 def chunk_documents(docs: List[Dict]) -> List[Chunk]:
-    """Ріже кожен документ по заголовках. Якщо заголовків немає — весь
-    документ стає одним чанком."""
+    """Split each document by Markdown headings. If there are no headings,
+    the whole document becomes one chunk."""
     chunks: List[Chunk] = []
     cid = 0
 
@@ -92,7 +91,7 @@ def chunk_documents(docs: List[Dict]) -> List[Chunk]:
                 cid += 1
             continue
 
-        # Текст перед першим заголовком
+        # Text before the first heading
         if headings[0].start() > 0:
             intro = text[: headings[0].start()].strip()
             if intro:
@@ -112,32 +111,29 @@ def chunk_documents(docs: List[Dict]) -> List[Chunk]:
 
 
 # ==================================================================
-# 3) Embeddings — локальний TF-IDF (без зовнішніх сервісів)
-# ==================================================================
-# ==================================================================
-# 3) Embeddings — локальний TF-IDF (без зовнішніх сервісів)
+# 3) TF-IDF embeddings
 # ==================================================================
 
-# Список базових англійських стоп-слів, які заважають пошуку
+# Common English stop words
 STOP_WORDS = {
-    "how", "to", "the", "a", "an", "and", "or", "but", "in", "on", "at", 
-    "by", "for", "with", "about", "against", "between", "into", "through", 
-    "during", "before", "after", "above", "below", "from", "up", 
-    "down", "out", "off", "over", "under", "again", "further", 
-    "then", "once", "here", "there", "when", "where", "why", "all", 
-    "any", "both", "each", "few", "more", "most", "other", "some", "such", 
-    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", 
+    "how", "to", "the", "a", "an", "and", "or", "but", "in", "on", "at",
+    "by", "for", "with", "about", "against", "between", "into", "through",
+    "during", "before", "after", "above", "below", "from", "up",
+    "down", "out", "off", "over", "under", "again", "further",
+    "then", "once", "here", "there", "when", "where", "why", "all",
+    "any", "both", "each", "few", "more", "most", "other", "some", "such",
+    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
     "s", "t", "can", "will", "just", "should", "now", "i", "you", "my"
 }
 
 def tokenize(text: str) -> List[str]:
     tokens = re.findall(r"[a-zA-Zа-яА-ЯіїєґІЇЄҐ0-9]+", text.lower())
-    # Відфільтровуємо службові слова
+    # Remove stop words
     return [t for t in tokens if t not in STOP_WORDS]
 
 
 class TfidfEmbedder:
-    """Локальний embedder. Реалізує .fit() і .encode() (як у sklearn, але без залежностей)."""
+    """Local TF-IDF embedder."""
 
     def __init__(self):
         self.vocab: Dict[str, int] = {}
@@ -175,14 +171,14 @@ class TfidfEmbedder:
             for idx, count in tf.items():
                 vecs[row, idx] = (count / len(tokens)) * self.idf[idx]
 
-        # L2-нормалізація -> dot product стає косинусною подібністю
+        # Normalize vectors
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         return vecs / norms
 
 
 # ==================================================================
-# 4) Векторне сховище (in-memory, косинусний пошук)
+# 4) Vector store
 # ==================================================================
 @dataclass
 class Hit:
@@ -202,13 +198,13 @@ class InMemoryVectorStore:
     def query(self, qvec: np.ndarray, k: int = 3) -> List[Hit]:
         if self.embeddings is None or len(self.chunks) == 0:
             return []
-        sims = self.embeddings @ qvec  # вектори вже нормалізовані -> це косинус
+        sims = self.embeddings @ qvec  # vectors are normalized
         order = np.argsort(-sims)[:k]
         return [Hit(chunk=self.chunks[i], score=float(sims[i])) for i in order]
 
 
 # ==================================================================
-# 5) Grounded генерація відповіді + citations (extractive fallback)
+# 5) Generate grounded answer
 # ==================================================================
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 
@@ -235,11 +231,11 @@ class Answer:
 
 
 def generate_answer(query: str, hits: List[Hit], embedder: TfidfEmbedder) -> Answer:
-    """Extractive grounded answer: серед речень top-hits обирає найрелевантніше до query."""
+    """Pick the best matching sentence from the retrieved chunks."""
     if not hits or hits[0].score < SIM_THRESHOLD:
         return Answer(text=NOT_FOUND, citations=[], grounded=False, hits=hits)
 
-    candidates: List[Tuple[str, str]] = []  # (речення, джерело)
+    candidates: List[Tuple[str, str]] = []  # (sentence, source)
     for hit in hits:
         for sent in split_sentences(hit.chunk.text):
             candidates.append((sent, hit.chunk.source))
@@ -265,7 +261,7 @@ def generate_answer(query: str, hits: List[Hit], embedder: TfidfEmbedder) -> Ans
 
 
 # ==================================================================
-# 6) Сам бот
+# 6) Main bot
 # ==================================================================
 class GroundedQABot:
     def __init__(self, embedder: Optional[TfidfEmbedder] = None,
@@ -301,13 +297,13 @@ class GroundedQABot:
         return self.store.query(qvec, k=k)
 
     def ask(self, question: str, k: int = 3) -> Answer:
-        """Offline extractive-режим (без LLM)."""
+        """Offline extractive mode."""
         hits = self.retrieve(question, k=k)
         return generate_answer(question, hits, self.embedder)
 
 
 # ==================================================================
-# 7) Демонстрація (можна запускати цей файл окремо)
+# 7) Demo
 # ==================================================================
 DEMO_QUESTIONS = [
     "How do I reset my password?",
@@ -315,31 +311,32 @@ DEMO_QUESTIONS = [
     "How do I delete a user?",
     "How does API authentication work?",
     "Which currencies are supported?",
-    "Do you have a mobile app?",   # немає в документації -> grounding спрацює
+    "Do you have a mobile app?",
 ]
 
 
 def _demo():
-    # За замовчуванням використовуємо стандартну папку docs
     docs_dir = DOCS_DIR
     questions = DEMO_QUESTIONS
 
-    # Якщо передано аргументи командного рядка
+    # Check command-line arguments
     if len(sys.argv) > 1:
         first_arg = sys.argv[1]
-        # Якщо перший аргумент — це шлях до існуючої папки
+
+        # If the first argument is a folder
         if os.path.isdir(first_arg):
             docs_dir = first_arg
-            # Якщо після папки передані ще аргументи, вважаємо їх окремими питаннями
+
+            # Use the remaining arguments as questions
             if len(sys.argv) > 2:
                 questions = sys.argv[2:]
         else:
-            # Якщо перший аргумент не є папкою, то вважаємо всі аргументи питаннями
+            # Otherwise treat all arguments as questions
             questions = sys.argv[1:]
 
-    # Індексуємо саме ту папку, яку визначили
+    # Index the selected folder
     bot = GroundedQABot().index(docs_dir)
-    
+
     print(f"Проіндексовано чанків: {len(bot.store.chunks)} "
           f"з {len(set(c.source for c in bot.store.chunks))} документів у папці: {docs_dir}\n")
 

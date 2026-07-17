@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Grounded Q&A Bot — точка входу.
+Grounded Q&A Bot entry point.
 
-Режими:
-  1. Offline RAG            — extractive, без LLM (речення береться прямо з документів)
-  2. Offline RAG + Ollama   — retrieval локально (TF-IDF), генерація через локальну Ollama
-  3. Normal Ollama          — без RAG, звичайний чат з моделлю
+Modes:
+  1. Offline RAG            — extractive, no LLM
+  2. Offline RAG + Ollama   — local retrieval (TF-IDF), generation with Ollama
+  3. Normal Ollama          — regular chat without RAG
 
-Ollama викликається через HTTP API з підтримкою потокового виведення (Streaming).
+Ollama is used through the HTTP API with streaming.
 
-Запуск:
+Run:
     python3 main.py
 """
 
@@ -46,17 +46,19 @@ def _choose_mode() -> str:
 
 
 def _choose_docs_path() -> str:
-    import os  # Імпортуємо os локально, щоб не чіпати імпорти вгорі файлу
-    
+    import os
+
     path = input(f"Enter path to documents [{DOCS_DIR}]: ").strip()
     if path:
-        # 1. Очищаємо від лапок, випадкових квадратних дужок [ ] та будь-яких видів пробілів (включаючи \xa0)
+        # Remove quotes, brackets and extra spaces
         path = path.strip('\'"[] \t\n\r\xa0')
-        # 2. Перетворюємо тильду (~) на реальний шлях до домашньої папки
+
+        # Expand "~" to the home directory
         path = os.path.expanduser(path)
-        # 3. Робимо шлях абсолютним
+
+        # Convert to an absolute path
         path = os.path.abspath(path)
-        
+
     return path or DOCS_DIR
 
 
@@ -120,8 +122,8 @@ def run_rag_ollama(docs_path: str, model: str) -> None:
             break
 
         hits = bot.retrieve(q, k=3)
-        
-        # Визначаємо найкращий score та перевіряємо його поріг
+
+        # Get the best score and check the threshold
         best_score = hits[0].score if hits else 0.0
         is_grounded = len(hits) > 0 and best_score >= bot.threshold
 
@@ -131,8 +133,7 @@ def run_rag_ollama(docs_path: str, model: str) -> None:
             continue
 
         context_chunks = [f"[{h.chunk.source} / {h.chunk.section}]\n{h.chunk.text}" for h in hits]
-        
-        # --- ПОТОКОВИЙ ВИВІД (STREAMING) ---
+
         print("\nAssistant > ", end="", flush=True)
         try:
             for token in ollama.ask_ollama_grounded(q, context_chunks, model=model):
@@ -146,7 +147,7 @@ def run_rag_ollama(docs_path: str, model: str) -> None:
             if h.chunk.source not in sources:
                 sources.append(h.chunk.source)
 
-        # Перехід на новий рядок та виведення джерел і метрик схожості
+        # Print sources and similarity score
         print(f"\n   ↳ Sources: {', '.join(sources)}")
         print(f"   (score={best_score:.2f}, grounded=True)\n")
 
@@ -165,8 +166,7 @@ def run_normal_ollama(model: str) -> None:
             continue
         if q.lower() in ("exit", "quit"):
             break
-            
-        # --- ПОТОКОВИЙ ВИВІД (STREAMING) ---
+
         print("\nAssistant > ", end="", flush=True)
         try:
             for token in ollama.ask_ollama_freeform(q, model=model):
